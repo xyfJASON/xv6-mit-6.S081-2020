@@ -706,7 +706,7 @@ countproc(void)
   for(p = proc; p < &proc[NPROC]; p++){
     acquire(&p->lock);
     cnt += (p->state != UNUSED);
-	release(&p->lock);
+    release(&p->lock);
   }
   return cnt;
 }

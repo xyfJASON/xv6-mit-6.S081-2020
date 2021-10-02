@@ -34,3 +34,63 @@ xv6 已经实现了一个 trace.c 用户程序，如果我们添加好了 trace 
 
 ## Sysinfo
 
+任务：添加一个系统调用 sysinfo 用于收集系统信息，它接受一个指向 struct sysinfo（见 kernel/sysinfo.h）的指针，内核需要填上这个结构体的两个元素：freemem 表示空闲内存的字节数，nproc 表示 state 不是 UNUSED 的进程的数量。
+
+在做了第一个任务之后，这个任务显得简单了许多，不过在码之前，先理一下 kernel 中各个文件之间的关系，因为着实有些混乱，如下图所示（以 fork 和 sleep 为例）：
+
+![kernel各文件关系](README_img/rel.png)
+
+1. 柿子先挑软的捏，我们先把系统调用这条路打通，和之前一样，参照其他调用在 user/user.h、user/usys.pl、kernel/syscall.h、kernel/syscall.c 中补上 sysinfo；这一步完成了就能够正常编译了；
+
+2. 接下来我们在 kernel/sysproc.c 中实现一个 sys_sysinfo() 函数，这个函数获取指向 struct sysinfo 的指针，求出当前系统空闲内存、非 UNUSED 进程数量，存进这个指针指向的结构体中。看起来我们只需要实现两个底层功能——countfreebytes() 和 countproc()……似乎很完美？但是事情没有这么简单！问题在这个指针上，指针是我们传入的参数，指向的是用户空间的虚拟内存，但是 xv6 系统内核中的页表和用户空间中的页表不一样，所以不能直接用这个指针！（事实上，xv6 内核的虚拟内存直接映射到物理内存，但用户空间中虚拟内存是从 0 开始的）。为了解决这个问题，我们需要使用 copyout() 函数，可以参看 sys_fstat()（kernel/sysfile.c）和 filestat()（kernel/file.c）的实现。综上，我们的 sysproc.c 长这样：
+
+   ```c
+   uint64
+   sys_sysinfo(void)
+   {
+     struct proc *p = myproc();
+     uint64 ptr; // pointer to struct sysinfo
+     if(argaddr(0, &ptr) < 0)
+       return -1;
+     struct sysinfo si;
+     si.freemem = countfreebytes();
+     si.nproc = countproc();
+     if(copyout(p->pagetable, ptr, (char *)&si, sizeof(si)) < 0)
+       return -1;
+     return 0;
+   }
+   ```
+
+3. 现在实现 countfreebytes()，指导网页提示我们在 kernel/kalloc.c 中实现它。阅读代码可以知道，一页有 4KB (PGSIZE)，空闲的页首构成一个链表 kmem.freelist，所以要求出空闲内存的字节数，数一数链表有多长即可：
+
+   ```c
+   // Count number of bytes of free memory
+   int
+   countfreebytes(void)
+   {
+     int cnt = 0;
+     struct run *r = kmem.freelist;
+     for(; r; r = r->next)
+       cnt += PGSIZE;
+     return cnt;
+   }
+   ```
+
+4.  最后实现 countproc()，指导网页提示我们在 kernel/proc.c 中实现它。阅读代码并且参照其他函数，知道我们可以用一个 for 循环遍历所有进程，数一数这里面有多少个不是 UNUSED 即可：
+
+   ```c
+   // Count number of processes whose state is not UNUSED.
+   int
+   countproc(void)
+   {
+     int cnt = 0;
+     struct proc *p;
+     for(p = proc; p < &proc[NPROC]; p++){
+       acquire(&p->lock);
+       cnt += (p->state != UNUSED);
+       release(&p->lock);
+     }
+     return cnt;
+   }
+   ```
+
