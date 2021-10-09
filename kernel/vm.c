@@ -386,6 +386,37 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   return -1;
 }
 
+// Copy content of user page table in range [st, ed) to kernel page table,
+// and clear content of kernel page table in range [ed, clear_ed).
+// Only copy PTE, do not copy physical memory.
+int
+pvmcopy(pagetable_t u_pagetable, pagetable_t k_pagetable, uint64 st, uint64 ed, uint64 clear_ed)
+{
+  // xyf
+  if(st > ed || PGROUNDUP(ed) >= PLIC || PGROUNDUP(clear_ed) >= PLIC)
+    return -1;
+  
+  // Copy PTE in [st, ed)
+  pte_t *pte_u, *pte_k;
+  for(uint64 va = PGROUNDUP(st); va < ed; va += PGSIZE){
+    if((pte_u = walk(u_pagetable, va, 0)) == 0)
+      panic("pvmcopy: pte should exist");
+    if((*pte_u & PTE_V) == 0)
+      panic("pvmcopy: page not present");
+
+    if((pte_k = walk(k_pagetable, va, 1)) == 0)
+      panic("pvmcopy: walk");
+    *pte_k = *pte_u & (~PTE_U);
+  }
+  // Unmap PTE in [ed, clear_ed)
+  for(uint64 va = PGROUNDUP(ed); va < clear_ed; va += PGSIZE){
+    if((pte_k = walk(k_pagetable, va, 0)) == 0)
+      panic("pvmcopy: walk");
+    *pte_k = 0;
+  }
+  return 0;
+}
+
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.
 void
@@ -430,6 +461,8 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
+  return copyin_new(pagetable, dst, srcva, len);
+
   uint64 n, va0, pa0;
 
   while(len > 0){
@@ -456,6 +489,8 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
+  return copyinstr_new(pagetable, dst, srcva, max);
+
   uint64 n, va0, pa0;
   int got_null = 0;
 

@@ -17,8 +17,8 @@ https://pdos.csail.mit.edu/6.S081/2020/labs/pgtbl.html
 最后，vm.c 正如其名，是管理虚拟内存的代码，包括（加粗重点）：
 
 - **walk**：在指定的页表中找到 pte 地址，若设置了 alloc 参数，可以**为页表开辟内存空间**（但是 walk 不会给叶子结点的页表项填写内容，即**不会建立映射**）；
-- **mappages**：**建立映射**，如果页表本身不存在会先开辟空间，要求原本没有映射；
-- **freewalk**：**释放页表本身**，要求所有映射已经被解除（页表项全部已经清零）；
+- **mappages**：**建立映射**，如果页表本身不存在会先开辟空间，**要求原本没有映射**；
+- **freewalk**：**释放页表本身**，**要求所有映射已经被解除**（页表项全部已经清零）；
 - walkaddr：在指定的用户页表中找虚拟地址对应的物理地址，如果页表不存在/映射不存在返回 0；
 
 
@@ -32,9 +32,9 @@ https://pdos.csail.mit.edu/6.S081/2020/labs/pgtbl.html
 
 - **uvmunmap**：**解除映射**（要求映射存在），若设置了 dofree 参数，会同时**释放页表项指向的空间**（注意不会释放页表本身）；
 - uvmcreate：创建一个新的用户页表，即为页表开辟空间；
-- uvminit：为第一个进程加载页表，很专用，我们不管；
-- uvmalloc：用户进程增加内存，我们不管；
-- uvmdealloc：用户进程减少内存，我们不管；
+- uvminit：为第一个进程加载页表；
+- uvmalloc：如果 newsz >= oldsz，则在 [oldsz, newsz) 区间内**开辟内存、创建页表并建立映射**。
+- uvmdealloc：如果 oldsz > newsz，则将 [newsz, oldsz) 区间内的页表**解除映射并释放页表项指向的空间**；
 - **uvmfree**：**解除映射、释放页表项指向的空间、释放页表本身**；
 - uvmcopy：把父进程的页表和页表项指向的物理空间复制给子进程；
 - uvmclear：把给一个 PTE 标志为 invalid，系统调用 exec 用它来设置 guard pages。
@@ -46,6 +46,10 @@ https://pdos.csail.mit.edu/6.S081/2020/labs/pgtbl.html
 - copyinstr：从用户地址 copy 一个字符串进内核
 
 
+
+它们的调用关系是：
+
+![](README_img/graph.png)
 
 再画一个表吧：
 
@@ -186,5 +190,105 @@ scheduler(void)
 
 
 
+## Simplify copyin/copyinstr
 
+任务：原本的 copyin 获取指向用户地址的指针，因此需要在用户页表中查找对应的物理地址。现在，我们把每个进程的用户页表加进它的内核页表，这样 copyin 就可以直接将用户指针解引用。这么做的前提是用户虚拟地址不能覆盖掉内核虚拟地址中存放数据和代码的部分，幸运的是，xv6 的用户虚拟地址从 0 开始，而内核从更高的地址开始，所以用户页表可以合并进内核页表。但是，用户虚拟地址不能超过内核最低的虚拟地址，即 PLIC，我们写代码时需要保证这一点。
 
+首先，修改 copyin 使之直接 return copyin_new，后者 xv6 已经实现好了；copyinstr 同理。
+
+接下来实现用户页表复制到内核页表的底层操作，我将其取名为 pvmcopy。与 uvmcopy 不同，uvmcopy 复制了物理内存，毕竟父子进程的变量不共享；但是 pvmcopy 只需要复制 PTE。注意，由于内核页表项不能被用户进程访问，所以复制的时候去掉 PTE_U 标志位。
+
+```c
+// Copy content of user page table in range [st, ed) to kernel page table,
+// and clear content of kernel page table in range [ed, clear_ed).
+// Only copy PTE, do not copy physical memory.
+int
+pvmcopy(pagetable_t u_pagetable, pagetable_t k_pagetable, uint64 st, uint64 ed, uint64 clear_ed)
+{
+  // xyf
+  if(st > ed || PGROUNDUP(ed) >= PLIC || PGROUNDUP(clear_ed) >= PLIC)
+    return -1;
+
+  // Copy PTE in [st, ed)
+  pte_t *pte_u, *pte_k;
+  for(uint64 va = PGROUNDUP(st); va < ed; va += PGSIZE){
+    if((pte_u = walk(u_pagetable, va, 0)) == 0)
+      panic("pvmcopy: pte should exist");
+    if((*pte_u & PTE_V) == 0)
+      panic("pvmcopy: page not present");
+
+    if((pte_k = walk(k_pagetable, va, 1)) == 0)
+      panic("pvmcopy: walk");
+    *pte_k = *pte_u & (~PTE_U);
+  }
+  // Unmap PTE in [ed, clear_ed)
+  for(uint64 va = PGROUNDUP(ed); va < clear_ed; va += PGSIZE){
+    if((pte_k = walk(k_pagetable, va, 0)) == 0)
+      panic("pvmcopy: walk");
+    *pte_k = 0;
+  }
+  return 0;
+}
+```
+
+上面的代码将 u_pagetable 中涉及 [st, ed) 范围的页表项复制给 k_pagetable。另外，有些操作会清除用户页表的一些页表项，所以为了方便我加了一个 clear_ed，当然这个功能可以拆成另一个函数写。
+
+<br>
+
+现在，我们需要找到所有对用户页表进行修改的操作，用 pvmcopy 同步修改内核页表，这样的操作在 fork(), exec() 和 sbrk() 中：
+
+- fork
+
+  fork 里面有一处涉及到修改 pagetable 的地方，是将父进程的用户页表（及物理空间）复制给子进程，这之后我们需要把子进程的新的用户页表复制到它的内核页表中：
+
+  ```c
+    if(pvmcopy(np->pagetable, np->k_pagetable, 0, np->sz, np->sz) < 0){
+      freeproc(np);
+      release(&np->lock);
+      return -1;
+    }
+  ```
+
+- exec
+
+  exec 会用新的进程**彻底覆盖**掉原来的进程，所以我们也应该用新的用户页表**彻底替换**掉原来的用户页表——彻底替换不仅要求复制新的，还要求清除旧的：
+
+  ```c
+    if(pvmcopy(pagetable, p->k_pagetable, 0, sz, oldsz) < 0)
+      goto bad;
+  ```
+
+- sbrk
+
+  sbrk 其实就是 growproc，会把进程的用户空间从 sz 大小变成 sz+n 大小。如果 n>0，用户空间增加，我们需要把增加的这一部分复制到内核页表中；如果 n<0，用户空间减少，我们需要把减少的部分从内核页表中清除：
+
+  ```c
+    if(n > 0){
+      if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+        return -1;
+      }
+      if(pvmcopy(p->pagetable, p->k_pagetable, p->sz, sz, sz) < 0)
+        return -1;
+    } else if(n < 0){
+      sz = uvmdealloc(p->pagetable, sz, sz + n);
+      if(pvmcopy(p->pagetable, p->k_pagetable, sz, sz, p->sz) < 0)
+        return -1;
+    }
+  ```
+
+<br>
+
+最后，别忘了在 userinit 中复制一份初始用户页表！（我就忘了，调了半天总是不对，吐血……）
+
+```c
+  // include user page table in kernel page table
+  pvmcopy(p->pagetable, p->k_pagetable, 0, p->sz, p->sz);
+```
+
+然后这次实验就<s>愉快地</s>结束了。
+
+<br>
+
+make grade 结果截图：
+
+![](README_img/result.png)
