@@ -1,0 +1,8 @@
+1. a1, a2 contain arguments to functions. For example, a2 holds 13 in main's call to printf.
+2. Compiler inlines function f to main as it directly use 12, g is inlined in f because f contains the same codes as g.
+3. Function printf is located in 0x630.
+4. ra's value is 0x38
+5. The output is: He110 World;
+   Set i to 0x726c6400;
+   No need to change 57616.
+6. Print whatever in a2 register, because printf would think a2 register contains what should be printed after "y=".
