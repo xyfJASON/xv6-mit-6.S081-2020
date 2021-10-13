@@ -129,6 +129,8 @@ found:
 
   // Initialize for alarm.
   p->ticks = p->remain_ticks = 0;
+  p->handler = 0;
+  p->save_trapframe = 0;
 
   return p;
 }

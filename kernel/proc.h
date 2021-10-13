@@ -107,4 +107,5 @@ struct proc {
   int ticks;                   // Ticks between two alarms. 
   uint64 handler;              // Alarm handler.
   int remain_ticks;            // Remaining ticks after last alarm.
+  struct trapframe *save_trapframe; // Save trapframe page when handling alarm.
 };

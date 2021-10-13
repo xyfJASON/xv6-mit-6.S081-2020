@@ -81,9 +81,11 @@ usertrap(void)
     if(p->ticks == 0)
       yield();
     p->remain_ticks--;
-    if(p->remain_ticks == 0){
+    if(p->remain_ticks == 0 && p->save_trapframe == 0){
       p->remain_ticks = p->ticks;
-      p->trapframe->epc = p->handler; // TODO
+      p->save_trapframe = (struct trapframe *)kalloc();
+      memmove(p->save_trapframe, p->trapframe, PGSIZE);
+      p->trapframe->epc = p->handler;
     }
   }
 
