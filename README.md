@@ -59,7 +59,7 @@ https://pdos.csail.mit.edu/6.S081/2020/labs/traps.html
 
 任务：在 `kernelprintf.c` 中添加一个 `backtrace()`，用于在出错时输出这之前栈中的函数调用。编译器会在每个栈帧中存入一个帧指针，指向调用者的帧指针。`backtrace()` 应该用这些帧指针来遍历栈并输出每个栈帧的保存的返回地址。
 
-看到题目的时候，我对帧指针这个术语很迷惑，直到我看到了它的缩写 `fp` 才反应过来这是当前函数的栈顶……然后我又对栈帧这个术语很迷惑，于是看了 [lecture notes](https://pdos.csail.mit.edu/6.828/2020/lec/l-riscv-slides.pdf)，哦，原来是当前函数用的这一段栈啊……notes 里面画的很清楚栈里面都有哪些内容：
+看到题目的时候，我对帧指针这个术语很迷惑，直到我看到了它的缩写 `fp` 才反应过来这是当前函数的栈底……然后我又对栈帧这个术语很迷惑，于是看了 [lecture notes](https://pdos.csail.mit.edu/6.828/2020/lec/l-riscv-slides.pdf)，哦，原来是当前函数用的这一段栈啊……notes 里面画的很清楚栈里面都有哪些内容：
 
 ![](README_img/note.png)
 
