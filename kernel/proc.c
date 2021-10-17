@@ -694,3 +694,22 @@ procdump(void)
     printf("\n");
   }
 }
+
+// xyf
+// Handle page fault with lazy allocation
+int
+lazy_allocate(uint64 va){
+  struct proc *p = myproc();
+  if(va >= p->sz || va < p->trapframe->sp)
+    return -1;
+  char *mem = kalloc();
+  if(mem == 0)
+    return -1;
+  memset(mem, 0, PGSIZE);
+  if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
+    kfree(mem);
+    uvmunmap(p->pagetable, PGROUNDDOWN(va), 1, 1);
+    return -1;
+  }
+  return 0;
+}

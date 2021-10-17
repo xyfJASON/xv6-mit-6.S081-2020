@@ -68,10 +68,19 @@ usertrap(void)
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
+    // xyf
+    uint64 cause = r_scause();
+    if(cause == 13 || cause == 15){
+      // page fault
+      uint64 stval = r_stval();
+      if(lazy_allocate(stval) == 0)
+        goto brk;
+    }
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
   }
+brk:
 
   if(p->killed)
     exit(-1);
