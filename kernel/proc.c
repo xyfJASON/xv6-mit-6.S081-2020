@@ -703,10 +703,7 @@ countproc(void)
 {
   int cnt = 0;
   struct proc *p;
-  for(p = proc; p < &proc[NPROC]; p++){
-    acquire(&p->lock);
+  for(p = proc; p < proc + NPROC; p++)
     cnt += (p->state != UNUSED);
-    release(&p->lock);
-  }
   return cnt;
 }

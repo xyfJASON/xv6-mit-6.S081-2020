@@ -12,15 +12,18 @@ xv6 已经实现了一个 trace.c 用户程序，如果我们添加好了 trace 
 
 现在我们需要好好研究一下 xv6 系统（基于 risc-v）究竟是如何完成系统调用的。【理了半天只总结了下面这些，如果有错误还请指出】
 
-不妨假设我们写了一个用户程序 sleep.c 并运行之，于是 CPU 开始「取指-译码-执行-访存-写回」（梦回计组）。跑着跑着，CPU 发现需要执行系统调用 sleep 了，于是将对应的编号（sleep 是 13 号，见 kernel/syscall.h）传入 a7 寄存器，并且调用 ecall 汇编指令（见 user/usys.S）使得进程陷入内核态（supervised mode）。这之后会发生一些事情，我们不管（其实是我看不懂），只需要知道系统调用编号从 a7 寄存器被捞了出来，存储到了 p->trapframe->a7 之中（p 是指向当前进程 pcb 的指针），然后执行 syscall （见 kernel/syscall.c）。syscall 就是一个高层封装，它会根据 p->trapframe->a7 存储的编号，然后找到对应系统调用的处理函数 sys_sleep，而 sys_sleep 还是一层封装……sys_sleep（见 kernel/sysproc.c）会从 p->trapframe->a0 中捞出 sleep 的参数，然后终于真真正正地跑确实让进程等待的 sleep 函数了（见 kernel/proc.c），最后把返回值放进 p->trapframe->a0 之中。
+假设我们调用 sleep 系统调用，那么下面的事情将会依次发生：
 
-整理一下这个过程：
+1. user/usys.S 中对应的汇编代码段将会得到执行：**它会将对应的编号**（sleep 是 13 号，见 kernel/syscall.h）**传入 a7 寄存器**，随后执行 ecall 汇编指令（见 user/usys.S）使得进程陷入内核态（supervised mode）；
+2. 陷入内核态时，kernel/trampoline.S 中 uservec 段的汇编代码将会得到执行。这一段代码的作用是：在 TRAPFRAME 这一段内存中保存用户的所有寄存器（**因此 a7 寄存器中的系统编号 13 现在被存入了 TRAPFRAME**），然后恢复一些内核所必要的寄存器，例如内核栈指针、hartid、内核页表的首地址……，最后调用 usertrap()；
+3. usertrap() 函数（见 kernel/trap.c）处理所有用户空间导致的 trap，一共有三种可能——系统调用、设备引起的中断、异常。这次我们只需要关注系统调用那一个 if 代码块。它会把返回地址设为当前 pc 加 4，这样就能返回到 ecall 的下一条指令；最后它会调用 syscall()；
+4. syscall() 就是一个高层封装，它首先获取系统调用编号 13（第 2 步已经存储到了 p->trapframe->a7 之中，p->trapframe 指向 TRAPFRAME 的物理地址），然后找到对应系统调用的处理函数 sys_sleep()；
+5. sys_sleep()（见 kernel/sysproc.c）还是一层封装……它会从 p->trapframe->a0 中捞出 sleep 的参数，然后终于真真正正地跑确实让进程等待的 sleep 函数了（见 kernel/proc.c），最后把返回值放进 p->trapframe->a0 之中；
+6. 返回时，首先执行 usertrapret()（见 kernel/trap.c），然后执行 trampoline.S 中的 usenet 段汇编代码，此处不再赘述。
 
-1. 我们自己写的**用户程序 sleep.c**，它运行在用户态中，调用了**系统调用 sleep**；
-2. **系统调用 sleep** 的编号 13 和它的参数在系统中被辗转腾挪，最后从用户态挪到了内核可以操纵的 p->trapframe 中；
-3. syscall 作为高层封装解析系统调用编号 13，发现是 sleep，于是调用 **sys_sleep**；
-4. **sys_sleep** 拿出参数，调用 kernel/proc.c 中 **sleep()** 函数；
-5. kernel/proc.c 中的这个 **sleep()** 函数才完成了实打实的、真正涉及到实现的功能。
+一图以蔽之：
+
+![](README_img/path.png)
 
 好了，现在要实现 trace 系统调用，怎么办呢？
 
@@ -93,4 +96,8 @@ xv6 已经实现了一个 trace.c 用户程序，如果我们添加好了 trace 
      return cnt;
    }
    ```
+
+make grade 截图：
+
+![](README_img/result.png)
 
