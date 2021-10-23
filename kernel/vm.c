@@ -311,7 +311,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  //char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -320,13 +320,20 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
+    // xyf
+    flags = (flags | PTE_COW) & (~PTE_W);
+    *pte = PA2PTE(pa) | flags;
+    if(mappages(new, i, PGSIZE, pa, flags) != 0)
+      goto err;
+    update_refcount(pa, 1);
+    /*
     if((mem = kalloc()) == 0)
       goto err;
     memmove(mem, (char*)pa, PGSIZE);
     if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
       kfree(mem);
       goto err;
-    }
+    }*/
   }
   return 0;
 
@@ -361,6 +368,10 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
+    // xyf
+    if(handle_cow(pagetable, va0, &pa0) == -1)
+      return -1;
+
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -439,4 +450,30 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+// xyf
+// Check if virtual address refers to a cow page and handle it.
+// Store the physical address of the newly allocated page in parameter newpa.
+// Return: -1 something wrong
+//          0 copy-on-write success
+//          1 no need to copy-on-write
+int
+handle_cow(pagetable_t pagetable, uint64 va, uint64 *newpa)
+{
+  pte_t *pte = walk(pagetable, va, 0);
+  if(pte == 0)  return -1;
+  if(*pte & PTE_COW){
+    // copy-on-write
+    uint flags = (PTE_FLAGS(*pte) & (~PTE_COW)) | PTE_W;
+    uint64 pa = PTE2PA(*pte);
+    char *mem = kalloc();
+    if(mem == 0)  return -1;
+    memmove(mem, (char *)pa, PGSIZE);
+    *pte = PA2PTE((uint64)mem) | flags;
+    kfree((void *)pa);
+    if(newpa) *newpa = (uint64)mem;
+    return 0;
+  }
+  return 1;
 }

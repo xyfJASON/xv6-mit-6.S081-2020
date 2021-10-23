@@ -23,6 +23,10 @@ struct {
   struct run *freelist;
 } kmem;
 
+// xyf
+#define idx(x) (((uint64)(x)-KERNBASE)/PGSIZE)
+int refcount[idx(PHYSTOP)];
+
 void
 kinit()
 {
@@ -35,8 +39,11 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE){
+    // xyf
+    refcount[idx(p)] = 1;
     kfree(p);
+  }
 }
 
 // Free the page of physical memory pointed at by v,
@@ -50,6 +57,14 @@ kfree(void *pa)
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  // xyf
+  // Free only when the last reference goes away.
+  if((uint64)pa >= KERNBASE){
+    if(refcount[idx(pa)] <= 0)
+      panic("kfree: refcount");
+    if(--refcount[idx(pa)]) return;
+  }
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -78,5 +93,22 @@ kalloc(void)
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
+
+  // xyf
+  if(r)
+    refcount[idx(r)] = 1;
+
   return (void*)r;
+}
+
+// xyf
+// Update refcount
+void
+update_refcount(uint64 pa, int val)
+{
+  if((pa % PGSIZE) != 0 || pa < KERNBASE || pa >= PHYSTOP)
+    panic("update_refcount");
+  refcount[idx(pa)] += val;
+  if(refcount[idx(pa)] < 0)
+    panic("update_refcount: less than 0");
 }
