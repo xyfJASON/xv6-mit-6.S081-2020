@@ -70,7 +70,7 @@ usertrap(void)
   } else {
     // xyf
     uint64 cause = r_scause();
-    if(cause == 13 || cause == 15){
+    if(cause == 15){
       // page fault
       uint64 stval = r_stval();
       if(handle_cow(p->pagetable, stval, 0) == 0)
