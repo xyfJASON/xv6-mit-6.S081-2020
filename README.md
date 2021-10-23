@@ -51,7 +51,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       kfree(mem);
       goto err;
     }*/
-  }
   ...
 }
 ```
@@ -75,13 +74,9 @@ usertrap(void)
       if(handle_cow(p->pagetable, stval, 0) == 0)
         goto brk;
     }
-    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    p->killed = 1;
+    ...
   }
 brk:
-  if(p->killed)
-    exit(-1);
   ...
 }
 ```
