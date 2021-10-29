@@ -28,10 +28,8 @@ void
 kinit()
 {
   // xyf
-  char lockname[6] = {0};
   for(int i = 0; i < NCPU; i++){
-    snprintf(lockname, 5, "kmem%d", i);
-    initlock(&kmems[i].lock, lockname);
+    initlock(&kmems[i].lock, "kmem");
     freerange(i == 0 ? end : (void*)PHYSTOP, (void*)PHYSTOP);
   }
   /*initlock(&kmem.lock, "kmem");

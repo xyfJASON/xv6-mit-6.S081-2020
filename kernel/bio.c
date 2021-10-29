@@ -27,11 +27,7 @@
 #define NBUCKETS 13
 
 inline uint myhash(uint blockno){
-  uint res = 0;
-  for(int i = 31; i > 0; i--)
-    res = (blockno >> i) + (res << 6) + (res << 16) - res;
-  res %= NBUCKETS;
-  return res;
+  return blockno % NBUCKETS;
 }
 
 struct {
@@ -53,9 +49,7 @@ binit(void)
 
   // xyf
   for(int i = 0; i < NBUCKETS; i++){
-    char lockname[7];
-    snprintf(lockname, 6, "bcache%d", i);
-    initlock(&bcache.lock[i], lockname);
+    initlock(&bcache.lock[i], "bcache");
     // Create linked list of buffers
     bcache.head[i].prev = &bcache.head[i];
     bcache.head[i].next = &bcache.head[i];
