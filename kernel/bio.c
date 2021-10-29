@@ -110,12 +110,9 @@ bget(uint dev, uint blockno)
   // Recycle the least recently used (LRU) unused buffer.
   // xyf
   b = bfind(hashid, 0);
-  if(!b){
-    for(int i = 0; i < NBUCKETS; i++){
-      if(i == hashid) continue;
+  if(!b)
+    for(int i = (hashid + 1) % NBUCKETS; i != hashid; i = (i + 1) % NBUCKETS)
       if((b = bfind(i, 1)))  break;
-    }
-  }
   if(b){
     b->next = bcache.head[hashid].next;
     b->prev = &bcache.head[hashid];

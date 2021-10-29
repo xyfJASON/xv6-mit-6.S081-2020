@@ -29,10 +29,8 @@ struct kmem{
 void
 kinit()
 {
-  char lockname[6] = {0};
   for(int i = 0; i < NCPU; i++){
-    snprintf(lockname, 5, "kmem%d", i);
-    initlock(&kmems[i].lock, lockname);
+    initlock(&kmems[i].lock, "kmem");
     freerange(i == 0 ? end : (void*)PHYSTOP, (void*)PHYSTOP);
   }
   /*initlock(&kmem.lock, "kmem");
@@ -109,24 +107,18 @@ xv6 在 bio.c 中实现了磁盘块的缓存机制，它是一个双向链表，
 
 我选择的方法是 Hash：原本只有一个双向链表维护所有缓存块，现在我开 NBUCKETS 个桶，每个桶里面维护一个双向链表。一个块应该去哪个桶里找由 Hash 确定。
 
-我用的 Hash 函数长这样：
+Hash 函数是最简单的直接取模：
 
 ```c
 #define NBUCKETS 13
 inline uint myhash(uint blockno){
-  uint res = 0;
-  for(int i = 31; i > 0; i--)
-    res = (blockno >> i) + (res << 6) + (res << 16) - res;
-  res %= NBUCKETS;
-  return res;
+  return blockno % NBUCKETS;
 }
 ```
 
-为什么用这样的 Hash 函数呢？不为什么，因为我喜欢（逃～。
-
 <br>
 
-现在干正事，首先修改 binit 给每个桶初始化：
+然后修改 binit 给每个桶初始化：
 
 ```c
 void
@@ -134,9 +126,7 @@ binit(void)
 {
   struct buf *b;
   for(int i = 0; i < NBUCKETS; i++){
-    char lockname[7];
-    snprintf(lockname, 6, "bcache%d", i);
-    initlock(&bcache.lock[i], lockname);
+    initlock(&bcache.lock[i], "bcache");
     // Create linked list of buffers
     bcache.head[i].prev = &bcache.head[i];
     bcache.head[i].next = &bcache.head[i];
@@ -181,14 +171,20 @@ bfind(int i, int needlock){
 }
 ```
 
-然后在 bget 中先对当前桶执行 bfind，如果没找到则遍历其他桶执行 bfind，把返回的缓存块插入当前桶的双向链表。有一个坑是：如果 bfind 的是当前桶，小心不要重复上锁。
+然后在 bget 中先对当前桶执行 bfind，如果没找到则窃取——遍历其他桶执行 bfind，把返回的缓存块插入当前桶的双向链表。有一个坑是：如果 bfind 的是当前桶，小心不要重复上锁。
+
+窃取的遍历顺序有讲究，如果每个桶都是从 0 号开始遍历，那么会产生死锁：
+
+![](README_img/dead.png)
+
+0 号桶和 1 号桶都先执行 bget，把自己锁住；然后 0 号桶找 1 号桶要空闲块，于是申请 1 号桶的锁；1 号桶找 0 号桶要空闲块，于是申请 0 号桶的锁——这样就死锁了。但这时系统的 2 号桶可能有空闲块是可以给出来的。
+
+要解决这个问题，我们可以更改遍历顺序：i 号桶从 i+1 开始向后遍历，直到绕一圈回来。其实这样做也可能死锁，但是死锁的唯一情形是——当前没有任何桶有空闲块，这样的情形下 xv6 原本的策略是 panic，不比死锁好哪儿去。
 
 <br>
 
 brelse、bpin、bunpin 都只需要把原来的锁换成当前桶的锁即可，这里不再赘述。
 
-<br>
-
-make grade 截图：
+<br>make grade 截图：
 
 ![](README_img/result.png)
