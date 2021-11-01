@@ -171,15 +171,141 @@ bfind(int i, int needlock){
 }
 ```
 
-然后在 bget 中先对当前桶执行 bfind，如果没找到则窃取——遍历其他桶执行 bfind，把返回的缓存块插入当前桶的双向链表。有一个坑是：如果 bfind 的是当前桶，小心不要重复上锁。
+在 bget 中，先对当前桶执行 bfind，如果没找到则窃取——遍历其他桶执行 bfind，把返回的缓存块插入当前桶的双向链表。有一个坑是：如果 bfind 的是当前桶，小心不要重复上锁。
 
-窃取的遍历顺序有讲究，如果每个桶都是从 0 号开始遍历，那么会产生死锁：
+然后本实验最难的点来了：**窃取过程可能发生死锁**。
+
+假设每个桶在窃取别人时都是从 0 号桶开始遍历，那么考虑如下情况：
 
 ![](README_img/dead.png)
 
 0 号桶和 1 号桶都先执行 bget，把自己锁住；然后 0 号桶找 1 号桶要空闲块，于是申请 1 号桶的锁；1 号桶找 0 号桶要空闲块，于是申请 0 号桶的锁——这样就死锁了。但这时系统的 2 号桶可能有空闲块是可以给出来的。
 
-要解决这个问题，我们可以更改遍历顺序：i 号桶从 i+1 开始向后遍历，直到绕一圈回来。其实这样做也可能死锁，但是死锁的唯一情形是——当前没有任何桶有空闲块，这样的情形下 xv6 原本的策略是 panic，不比死锁好哪儿去。
+要解决这个问题，我和同学经过了漫长的讨论，目前有两种方案。但是，**panic 或者死锁很难很难很难很难复现，所以我也没法保证下述策略一定正确……**
+
+
+
+### 方案一：更改遍历顺序
+
+i 号桶在窃取时从 i+1 开始向后遍历，直到绕一圈回来。其实这样做也可能死锁，但是死锁的唯一情形是——当前没有任何桶有空闲块，这样的情形下 xv6 原本的策略是 panic，不比死锁好哪儿去。
+
+```c
+static struct buf*
+bget(uint dev, uint blockno)
+{
+  struct buf *b;
+
+  uint hashid = myhash(blockno);
+  acquire(&bcache.lock[hashid]);
+
+  // Is the block already cached?
+  for(b = bcache.head[hashid].next; b != &bcache.head[hashid]; b = b->next){
+    if(b->dev == dev && b->blockno == blockno){
+      b->refcnt++;
+      release(&bcache.lock[hashid]);
+      acquiresleep(&b->lock);
+      return b;
+    }
+  }
+
+  // Not cached.
+  // Recycle the least recently used (LRU) unused buffer.
+  b = bfind(hashid, 0);
+  if(!b)
+    for(int i = (hashid + 1) % NBUCKETS; i != hashid; i = (i + 1) % NBUCKETS)
+      if((b = bfind(i, 1)))  break;
+  if(b){
+    b->next = bcache.head[hashid].next;
+    b->prev = &bcache.head[hashid];
+    bcache.head[hashid].next->prev = b;
+    bcache.head[hashid].next = b;
+
+    b->dev = dev;
+    b->blockno = blockno;
+    b->valid = 0;
+    b->refcnt = 1;
+    release(&bcache.lock[hashid]);
+    acquiresleep(&b->lock);
+    return b;
+  }
+  panic("bget: no buffers");
+}
+```
+
+
+
+### 方案二：加全局锁
+
+仔细思考死锁什么时候会发生：当我窃取别人时，别人也在窃取我。但是，我去窃取别人这个动作本身就说明了我自己都一贫如洗不能自给自足，别人还来窃取我，那必然是徒劳无功的。所以，如果我现在放开自己的锁，打开家门让别人来自己的桶里逛一圈，别人也拿不走什么东西。所以我们有了初步的解决方案：在窃取别人前释放自己的锁。
+
+然而，当我们兴致勃勃地写完代码运行测试的时候，就会发现 `panic freeing free block`。
+
+panic 的原因是我们没有保证 bget 的原子性，使得两个进程将同一个磁盘块做了两次缓存——在进程 1 释放锁之后，进程 2 也去访问同一个磁盘块，于是两个进程各自偷了一块缓存块，都对磁盘块做了缓存。由于这样很容易导致两个缓存不一致，因此是不被允许的。
+
+要解决（缓解）这个问题，考虑引入全局锁——即对整个 bcache 上锁。假若一个进程在释放某桶的锁之后，能立即加上全局锁，就可以避免另一个进程来找同一个磁盘块。
+
+但毕竟我们没法保证释放桶锁和加全局锁这两个操作是原子的，如果有个进程好巧不巧（概率很小）在这两个操作之间来查找同一个磁盘块，仍然会 panic。所以这种做法能够极大的缓解 panic 问题，但并没有根本上解决它。
+
+针对重复缓存的问题，我想了个办法：在窃取到缓存块之后，先在桶里再次查找一番是否有已映射的缓存块，如果有，就不映射窃取来的缓存块了。好比我出门走了一趟，回来发现已经有人往我家里放了我要的东西。
+
+```c
+static struct buf*
+bget(uint dev, uint blockno)
+{
+  struct buf *b;
+
+  uint hashid = myhash(blockno);
+  acquire(&bcache.buclock[hashid]);
+
+  // Is the block already cached?
+  for(b = bcache.head[hashid].next; b != &bcache.head[hashid]; b = b->next){
+    if(b->dev == dev && b->blockno == blockno){
+      b->refcnt++;
+      release(&bcache.buclock[hashid]);
+      acquiresleep(&b->lock);
+      return b;
+    }
+  }
+
+  // Not cached.
+  // Recycle the least recently used (LRU) unused buffer.
+  b = bfind(hashid, 0);
+  if(!b){
+    release(&bcache.buclock[hashid]);
+    acquire(&bcache.lock);
+    for(int i = 0; i < NBUCKETS; i++)
+      if(i != hashid && (b = bfind(i, 1)))  break;
+    release(&bcache.lock);
+    acquire(&bcache.buclock[hashid]);
+  }
+  if(b){
+    b->next = bcache.head[hashid].next;
+    b->prev = &bcache.head[hashid];
+    bcache.head[hashid].next->prev = b;
+    bcache.head[hashid].next = b;
+  }
+  for(struct buf *bi = bcache.head[hashid].next; bi != &bcache.head[hashid]; bi = bi->next){
+    if(bi->dev == dev && bi->blockno == blockno){
+      bi->refcnt++;
+      release(&bcache.buclock[hashid]);
+      acquiresleep(&bi->lock);
+      return bi;
+    }
+  }
+  if(b){
+    b->dev = dev;
+    b->blockno = blockno;
+    b->valid = 0;
+    b->refcnt = 1;
+    release(&bcache.buclock[hashid]);
+    acquiresleep(&b->lock);
+    return b;
+  }
+  panic("bget: no buffers");
+}
+```
+
+我强调这种办法只是为了解决重复缓存的问题，但是会不会导致其他问题嘛……我也不敢保证……
 
 <br>
 
