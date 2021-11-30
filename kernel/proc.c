@@ -12,6 +12,11 @@ struct proc proc[NPROC];
 
 struct proc *initproc;
 
+struct {  // xyf
+  struct spinlock lock;
+  struct VMA vmas[NVMA];
+} vmatable;
+
 int nextpid = 1;
 struct spinlock pid_lock;
 
@@ -48,6 +53,7 @@ procinit(void)
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->kstack = KSTACK((int) (p - proc));
+      p->curmax = MAXVA - 2 * PGSIZE; // xyf: init curmax for vma
   }
 }
 
@@ -300,6 +306,25 @@ fork(void)
 
   pid = np->pid;
 
+  // xyf
+  struct VMA *vma = 0, *pre = 0;
+  np->vmalist = 0;
+  for(vma = p->vmalist; vma; vma = vma->nxt){
+    // alloc a vma
+    struct VMA *newvma = allocvma();
+    // fill in newvma
+    newvma->shared = vma->shared;
+    newvma->perm = vma->perm;
+    newvma->filept = vma->filept;
+    newvma->vmstart = vma->vmstart;
+    newvma->vmend = vma->vmend;
+    filedup(vma->filept);
+    // add newvma to np's linklist
+    if(pre == 0)  np->vmalist = newvma;
+    else  pre->nxt = newvma, newvma->nxt = 0;
+    pre = newvma;
+  }
+
   np->state = RUNNABLE;
 
   release(&np->lock);
@@ -343,6 +368,19 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  // xyf: munmap
+  struct VMA *vma = 0, *nxtvma = 0;
+  for(vma = p->vmalist; vma; vma = nxtvma){
+    nxtvma = vma->nxt;
+    for(uint64 i = vma->vmstart; i < vma->vmend; i += PGSIZE)
+      if(walkaddr(p->pagetable, i))
+        uvmunmap(p->pagetable, i, 1, 1);
+    vma->nxt = 0;
+    fileclose(vma->filept);
+    deallocvma(vma);
+  }
+  p->vmalist = 0;
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
@@ -700,4 +738,60 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+void
+vmainit(void)
+{
+  initlock(&vmatable.lock, "vmatable");
+}
+
+struct VMA*
+allocvma(void)
+{
+  acquire(&vmatable.lock);
+  int i;
+  for(i = 0; i < NVMA; i++){
+    if(vmatable.vmas[i].valid)
+      continue;
+    vmatable.vmas[i].valid = 1;
+    break;
+  }
+  release(&vmatable.lock);
+  if(i == NVMA) panic("allocvma");
+  return vmatable.vmas + i;
+}
+
+void
+deallocvma(struct VMA *vma)
+{
+  acquire(&vmatable.lock);
+  vma->valid = 0;
+  release(&vmatable.lock);
+}
+
+int
+mmaplazy(uint64 va, uint64 cause)
+{
+  struct proc *p = myproc();
+  // find the corresponding vma
+  struct VMA *vma = 0;
+  for(vma = p->vmalist; vma; vma = vma->nxt)
+    if(vma->valid && vma->vmstart <= va && va < vma->vmend)
+      break;
+  if(!vma)  return -1;
+  if(cause == 13 && !(vma->perm & PTE_R)) return -1;
+  if(cause == 15 && !(vma->perm & PTE_W)) return -1;
+  // allocate physical memory and map pte
+  char *mem = kalloc();
+  if(mem == 0)  return -1;
+  memset(mem, 0, PGSIZE);
+  uint64 vaalign = PGROUNDDOWN(va);
+  if(mappages(p->pagetable, vaalign, PGSIZE, (uint64)mem, vma->perm|PTE_U|PTE_X) != 0){
+    kfree(mem);
+    return -1;
+  }
+  // read content of file into allocated memory
+  mmapfileread(vma->filept, 0, (uint64)mem, vaalign - vma->vmstart, PGSIZE);
+  return 0;
 }

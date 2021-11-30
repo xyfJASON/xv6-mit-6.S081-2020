@@ -484,3 +484,95 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  int length, prot, flags, fd, offset;
+  struct proc *p = myproc();
+
+  if(argaddr(0, &addr) < 0 ||
+     argint(1, &length) < 0 ||
+     argint(2, &prot) < 0 ||
+     argint(3, &flags) < 0 ||
+     argint(4, &fd) < 0 ||
+     argint(5, &offset) < 0)
+    return -1;
+  if(addr != 0) panic("sys_mmap");
+  if(offset != 0) panic("sys_mmap");
+  
+  struct file *f = p->ofile[fd];
+  if((prot & PROT_READ) && !f->readable)
+    return -1;
+  if((prot & PROT_WRITE) && (flags & MAP_SHARED) && !f->writable)
+    return -1;
+
+  // alloc a vma
+  struct VMA *vma = allocvma();
+  if(!vma)  return -1;
+  // fill in vma
+  vma->perm = ((prot & PROT_READ) ? PTE_R : 0) |
+              ((prot & PROT_WRITE) ? PTE_W : 0);
+  vma->shared = (flags & MAP_SHARED) ? 1 : 0;
+  vma->filept = f;
+  filedup(f);
+  // add vma to process's linklist
+  vma->nxt = p->vmalist;
+  p->vmalist = vma;
+  // find an unused region in the process's address space in which to map the file
+  uint64 vmaddr = PGROUNDDOWN(p->curmax - length);
+  if(vmaddr % PGSIZE != 0)  panic("sys_mmap");
+  vma->vmstart = vmaddr;
+  vma->vmend = p->curmax;
+  p->curmax = vmaddr;
+
+  return vmaddr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+  struct proc *p = myproc();
+
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+    return -1;
+
+  // find the VMA for the address range
+  uint64 st = PGROUNDDOWN(addr);
+  uint64 ed = PGROUNDUP(addr + length);
+  struct VMA *vma = 0, *pre = 0;
+  for(vma = p->vmalist; vma; vma = vma->nxt){
+    if(vma->valid && vma->vmstart <= st && ed <= vma->vmend)
+      break;
+    pre = vma;
+  }
+  if(!vma)  return -1;
+
+  // write back if needed
+  if(vma->shared && (vma->perm | PTE_W))
+    mmapfilewrite(vma->filept, st, ed - st);
+  // unmap specified pages
+  for(uint64 i = st; i < ed; i += PGSIZE){
+    if(walkaddr(p->pagetable, i)){
+      // need to check because vma is allocated lazily
+      uvmunmap(p->pagetable, i, 1, 1);
+    }
+  }
+  // update info in vma
+  if(vma->vmstart == st && ed < vma->vmend)
+    vma->vmstart = PGROUNDDOWN(addr + length);
+  else if(vma->vmstart < st && ed == vma->vmend)
+    vma->vmend = PGROUNDUP(addr);
+  else if(vma->vmstart == st && ed == vma->vmend){
+    if(pre == 0)  p->vmalist = vma->nxt;
+    else  pre->nxt = vma->nxt, vma->nxt = 0;
+    fileclose(vma->filept);
+    deallocvma(vma);
+  }
+  else ;
+
+  return 0;
+}

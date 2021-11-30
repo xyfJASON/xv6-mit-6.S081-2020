@@ -180,3 +180,33 @@ filewrite(struct file *f, uint64 addr, int n)
   return ret;
 }
 
+int mmapfileread(struct file *f, int user_dst, uint64 dst, uint off, uint n){ 
+  ilock(f->ip);
+  int ret = readi(f->ip, user_dst, dst, off, n);
+  iunlock(f->ip);
+  return ret;
+}
+
+int mmapfilewrite(struct file *f, uint64 addr, uint n){
+  int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
+  int i = 0;
+  while(i < n){
+    int n1 = n - i;
+    if(n1 > max)
+      n1 = max;
+
+    begin_op();
+    ilock(f->ip);
+    int r = writei(f->ip, 1, addr + i, i, n1);
+    iunlock(f->ip);
+    end_op();
+
+    if(r != n1){
+      // error from writei
+      break;
+    }
+    i += r;
+  }
+  int ret = (i == n ? n : -1);
+  return ret;
+}
